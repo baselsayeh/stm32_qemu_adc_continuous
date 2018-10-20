@@ -627,7 +627,10 @@ struct Stm32Adc {
 
     bool converting;
 
+	bool conv_continuous;
+
     struct QEMUTimer *conv_timer;
+    struct QEMUTimer *conv_timer_cont;
 
     CharDriverState *chr;
 
@@ -715,7 +718,8 @@ static void stm32_adc_start_conv(Stm32Adc *s)
       }
       s->ADC_SR&=~ADC_SR_EOC;  // jmf : indicates ongoing conversion
       // calls conv_complete when expires      
-      timer_mod(s->conv_timer,  curr_time + stm32_ADC_get_nbr_cycle_per_sample(s,channel_number)); 
+      if (s->conv_continuous == false)
+        timer_mod(s->conv_timer,  curr_time + stm32_ADC_get_nbr_cycle_per_sample(s,channel_number)); 
 }
 
 
@@ -724,6 +728,22 @@ static void stm32_adc_start_conv(Stm32Adc *s)
 static void stm32_adc_conv_timer_expire(void *opaque) {
     Stm32Adc *s = (Stm32Adc *)opaque;
     stm32_adc_conv_complete(s);
+}
+
+//Continuous
+static void stm32_adc_conv_timer_expire_cont(void *opaque) {
+	uint64_t curr_time = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    Stm32Adc *s = (Stm32Adc *)opaque;
+
+    stm32_adc_start_conv(s);
+    stm32_adc_conv_complete(s);
+
+	//printf("%llu!\n", stm32_ADC_get_nbr_cycle_per_sample(s,stm32_ADC_get_channel_number(s,1)));
+
+	//timer_mod(s->conv_timer_cont,  curr_time + stm32_ADC_get_nbr_cycle_per_sample(s,stm32_ADC_get_channel_number(s,1)) );
+	timer_mod(s->conv_timer_cont,  curr_time + (stm32_ADC_get_nbr_cycle_per_sample(s, stm32_ADC_get_channel_number(s,1) ) * (1e3)) );
+	//timer_mod(s->conv_timer_cont,  curr_time + ( 20 * (1e3)) );
 }
 
 /* Checks the ADC GPIO PIN Mode and Config */
@@ -820,6 +840,8 @@ static void stm32_ADC_SQR1_write(Stm32Adc *s,uint32_t new_value)
 
 static void stm32_ADC_CR2_write(Stm32Adc *s,uint32_t new_value)
 {      
+    uint64_t curr_time = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
     s->ADC_CR2=new_value & 0x00fef90f; 
  
     if (s->ADC_CR2&ADC_CR2_SWSTART )  
@@ -827,9 +849,30 @@ static void stm32_ADC_CR2_write(Stm32Adc *s,uint32_t new_value)
       if(!(s->ADC_CR2 & ADC_CR2_ADON))   //CR2_ADON should be set (for Enable ADC) before start conversion
          hw_error("Attempted to start conversion while ADC was disabled\n");
 
-      stm32_ADC_GPIO_check(s,stm32_ADC_get_channel_number(s,1)); // check GPIO (Mode and config)  ANALOG INTPUT?  
-      stm32_adc_start_conv(s); // jmf : software conv
-    }
+      if (s->conv_continuous != true) {
+        stm32_ADC_GPIO_check(s,stm32_ADC_get_channel_number(s,1)); // check GPIO (Mode and config)  ANALOG INTPUT?  
+        stm32_adc_start_conv(s); // jmf : software conv
+	  } else {
+        printf("ignore request ADC_CR2_SWSTART!\n");
+	  }
+    } else if (s->ADC_CR2&ADC_CR2_CONT )  
+    {
+      /*if(!(s->ADC_CR2 & ADC_CR2_ADON))   //CR2_ADON should be set (for Enable ADC) before start conversion
+         hw_error("Attempted to start conversion while ADC was disabled\n");*/
+
+      /*stm32_ADC_GPIO_check(s,stm32_ADC_get_channel_number(s,1)); // check GPIO (Mode and config)  ANALOG INTPUT?  
+      stm32_adc_start_conv(s); // jmf : software conv*/
+      s->conv_continuous = true;
+      //timer_mod(s->conv_timer_cont,  curr_time + stm32_ADC_get_nbr_cycle_per_sample(s,stm32_ADC_get_channel_number(s,1)) );
+      timer_mod(s->conv_timer_cont,  curr_time + stm32_ADC_get_nbr_cycle_per_sample(s,stm32_ADC_get_channel_number(s,1)) );
+
+    /*} else if (s->ADC_CR2 & ADC_CR2_ADON) {
+		printf("ggg\n");
+		if (s->conv_continuous == true) {
+		  timer_mod(s->conv_timer_cont,  curr_time + stm32_ADC_get_nbr_cycle_per_sample(s,stm32_ADC_get_channel_number(s,1)) ); 
+		  printf("Contimuous!\n");
+		}*/
+	}
    
 }
 
@@ -986,6 +1029,7 @@ static int stm32_adc_init(SysBusDevice *dev)
     sysbus_init_mmio(dev, &s->iomem);
     sysbus_init_irq(dev, &s->irq);
     s->conv_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, (QEMUTimerCB *)stm32_adc_conv_timer_expire, s);
+    s->conv_timer_cont = timer_new_ns(QEMU_CLOCK_VIRTUAL, (QEMUTimerCB *)stm32_adc_conv_timer_expire_cont, s);
 
     /* Register handlers to handle updates to the ADC's peripheral clock. */
     clk_irq = qemu_allocate_irqs(stm32_adc_clk_irq_handler, (void *)s, 1);   // jmf : segfault
